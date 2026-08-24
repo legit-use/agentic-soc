@@ -1,0 +1,52 @@
+# ==========================================
+# AEGIS-SOC // Git Ignore Configuration
+# ==========================================
+
+# 1. Environment Secrets & API Keys
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.cert
+
+# 2. Python Bytecode & Cache
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# 3. Virtual Environments
+venv/
+.venv/
+env/
+ENV/
+
+# 4. Large Datasets & Log Files (Prevents GitHub 100MB File Limits)
+*.csv
+my_dataset.csv/
+rba-dataset.csv
+enterprise_auth_logs.csv
+*.log
+*.sqlite
+*.db
+
+# 5. ChromaDB Vector Store Persistence
+chroma_db/
+.chroma/
+
+# 6. IDE, OS & Editor Artifacts
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# 7. Antigravity System Generated Artifacts
+.system_generated/
+scratch/
