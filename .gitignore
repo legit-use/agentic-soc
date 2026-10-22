@@ -50,3 +50,18 @@ desktop.ini
 # 7. Antigravity System Generated Artifacts
 .system_generated/
 scratch/
+
+# 8. Project Thesis Reports, Visuals & Doc Converters (Kept Locally Only)
+*.docx
+*.pdf
+AEGIS_SOC_8_STAGE_FRAMEWORK.md
+METHODOLOGY_DATA_FLOW.md
+METHODOLOGY_PRESENTATION_GUIDE.md
+PROJECT_ARCHITECTURE_AND_DATAFLOW.md
+PROJECT_TECHNICAL_INVENTORY.md
+RUNNING_COMMANDS.md
+UNIVERSITY_PANEL_PRESENTATION_SCRIPT.md
+report_screenshots/
+docs/
+tools/convert_md_to_docx.py
+tools/generate_*.py
