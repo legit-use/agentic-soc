@@ -10,21 +10,21 @@ from pydantic import BaseModel, Field
 
 class GeoLocation(BaseModel):
     """Geographic location information associated with telemetry IP."""
-    city: str = Field(..., description="City name (e.g. London, New York)")
-    country: str = Field(..., description="ISO Country Code or name (e.g. UK, USA)")
-    lat: float = Field(..., description="Latitude (-90.0 to 90.0)")
-    lon: float = Field(..., description="Longitude (-180.0 to 180.0)")
+    city: str = Field(default="London", description="City name (e.g. London, New York)")
+    country: str = Field(default="UK", description="ISO Country Code or name (e.g. UK, USA)")
+    lat: float = Field(default=51.5074, description="Latitude (-90.0 to 90.0)")
+    lon: float = Field(default=-0.1278, description="Longitude (-180.0 to 180.0)")
 
 
 class TelemetryEvent(BaseModel):
     """Raw enterprise authentication telemetry event payload."""
-    event_id: str = Field(..., description="Unique event identification string (UUID/hash)")
-    timestamp: str = Field(..., description="ISO 8601 timestamp string")
+    event_id: str = Field(default="EVT-000001", description="Unique event identification string (UUID/hash)")
+    timestamp: str = Field(default_factory=lambda: datetime.utcnow().isoformat() + "Z", description="ISO 8601 timestamp string")
     user_principal_name: str = Field(..., description="User UPN/Email (e.g. alex.hunter@enterprise.com)")
-    source_ip: str = Field(..., description="IPv4 or IPv6 source address")
-    session_token: str = Field(..., description="Authentication session token / bearer cookie")
-    geo: GeoLocation = Field(..., description="Geographic location of source IP")
-    user_agent: str = Field(..., description="HTTP User-Agent string")
+    source_ip: str = Field(default="127.0.0.1", description="IPv4 or IPv6 source address")
+    session_token: Optional[str] = Field(default="cookie_standard_auth_session", description="Authentication session token / bearer cookie")
+    geo: Optional[GeoLocation] = Field(default_factory=lambda: GeoLocation(city="London", country="UK", lat=51.5074, lon=-0.1278), description="Geographic location of source IP")
+    user_agent: Optional[str] = Field(default="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36", description="HTTP User-Agent string")
 
 
 class AgentAssessment(BaseModel):
@@ -42,6 +42,11 @@ class AgentAssessment(BaseModel):
     soar_execution_logs: List[Dict[str, Any]] = Field(default_factory=list, description="Automated SOAR mitigation execution trace")
     velocity_kmh: Optional[float] = Field(None, description="Calculated travel velocity in km/h if previous telemetry exists")
     token_entropy: Optional[float] = Field(None, description="Calculated Shannon entropy of session token")
+    # Verified Swarm & SOAR Verification Extensions
+    critic_override: bool = Field(default=False, description="Flag indicating if Critic Guardrail node intercepted an ungrounded LLM hallucination")
+    critic_note: Optional[str] = Field(default="", description="Audit note from Critic Guardrail node")
+    evaluation_verified: bool = Field(default=True, description="Closed-loop SOAR post-execution verification state")
+    audit_trace: Optional[str] = Field(default="", description="Closed-loop SOAR audit trace string")
 
 
 class HITLApprovalRequest(BaseModel):

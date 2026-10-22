@@ -65,3 +65,6 @@ def calculate_travel_velocity(
     
     velocity_kmh = distance_km / effective_hours
     return round(velocity_kmh, 2)
+
+
+

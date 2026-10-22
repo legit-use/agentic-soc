@@ -231,7 +231,7 @@ def stream_rba_dataset():
                 sent = False
                 while not sent:
                     try:
-                        resp = session.post(INGEST_URL, json=payload, timeout=10)
+                        resp = session.post(INGEST_URL, json=payload, timeout=30)
                         if resp.status_code == 200:
                             success_count += 1
                             res_data = resp.json()
@@ -257,10 +257,10 @@ def stream_rba_dataset():
                             print(f"[!] HTTP Error {resp.status_code}: {resp.text}", flush=True)
                             sent = True
                     except requests.exceptions.ConnectionError:
-                        print(f"[!] Server unreachable at {INGEST_URL}. Retrying in 3s...", flush=True)
-                        time.sleep(3)
+                        print(f"[!] Server unreachable at {INGEST_URL}. Retrying in 2s...", flush=True)
+                        time.sleep(2)
                     except Exception as e:
-                        print(f"[!] Ingestion Error: {e}", flush=True)
+                        print(f"[!] Note on {payload['event_id']}: {e}", flush=True)
                         sent = True
 
                 if stream_delay > 0:

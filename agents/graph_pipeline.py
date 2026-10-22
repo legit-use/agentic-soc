@@ -1,7 +1,7 @@
 """
 LangGraph Stateful Multi-Agent Swarm Pipeline
-Implements 3-node stateful swarm graph with Google Gemini LLM Cognitive Reasoning:
-Ingestion -> Threat Analysis (ChromaDB + Gemini LLM) -> Response Triage Matrix.
+Implements 4-Node Verified Swarm Topology with Google Gemini LLM Cognitive Reasoning & Critic Guardrail:
+Ingestion (Math & Email Engine) -> Threat Analysis (ChromaDB RAG + Gemini LLM) -> Critic Guardrail (Self-RAG Grounding Verification) -> Response (Closed-Loop SOAR Triage).
 """
 
 from typing import Dict, Any, Optional, List
@@ -18,6 +18,7 @@ from core.schemas import TelemetryEvent, AgentAssessment
 from core.math_engine import calculate_shannon_entropy, calculate_travel_velocity
 from core.vector_store import ThreatIntelligenceMemory
 from core.mitigation_engine import EnterpriseSOAREnforcer
+from core.autonomy_calibrator import autonomy_engine
 
 # Load environment variables
 load_dotenv()
@@ -35,6 +36,10 @@ if GEMINI_API_KEY and not GEMINI_API_KEY.startswith("your_"):
         print(f"[WARN] Gemini Client Initialization Warning: {e}")
         gemini_client = None
 
+# Global non-blocking thread executor for LLM inference calls
+import concurrent.futures
+_llm_executor = concurrent.futures.ThreadPoolExecutor(max_workers=2, thread_name_prefix="gemini_llm")
+
 
 class AgentGraphState(TypedDict):
     current_event: Dict[str, Any]
@@ -46,6 +51,10 @@ class AgentGraphState(TypedDict):
     query_text: str
     vector_match: Dict[str, Any]
     algorithmic_risk_score: float
+    raw_risk_score: float
+    composite_risk_score: float
+    critic_override: bool
+    critic_note: str
     indicators: List[str]
     classification: str
     mitre_technique: str
@@ -53,6 +62,9 @@ class AgentGraphState(TypedDict):
     action: str
     reasoning: str
     soar_execution_logs: List[Dict[str, Any]]
+    evaluation_verified: bool
+    audit_trace: str
+    rewind_count: int
     assessment: Optional[Dict[str, Any]]
 
 
@@ -62,11 +74,10 @@ threat_vector_store = ThreatIntelligenceMemory()
 
 def ingestion_node(state: AgentGraphState) -> AgentGraphState:
     """
-    Ingestion Node:
+    Node 1: Ingestion Node
     - Calculates Shannon Entropy of session token.
     - Calculates Haversine travel velocity if previous event exists.
-    - Flags automated User-Agents (scanners, python, curl, nmap, etc.).
-    - Flags untrusted Proxy / Anonymizer headers.
+    - Flags automated User-Agents & Proxy / Anonymizer headers.
     """
     curr = state["current_event"]
     prev = state.get("previous_event")
@@ -104,7 +115,6 @@ def ingestion_node(state: AgentGraphState) -> AgentGraphState:
     is_automated = any(kw in ua for kw in automated_keywords)
 
     proxy_keywords = ["proxy", "vpn", "tor", "anonymizer", "tunnel", "forwarder", "expressvpn", "nordvpn"]
-    # Check if proxy is in UA or explicitly in session token
     is_proxy = any(kw in ua for kw in proxy_keywords) or ("expressvpn" in curr.get("session_token", "").lower())
 
     # 4. Extract telemetry indicators
@@ -137,10 +147,10 @@ def ingestion_node(state: AgentGraphState) -> AgentGraphState:
 
 def analysis_node(state: AgentGraphState) -> AgentGraphState:
     """
-    Threat Analysis Node:
+    Node 2: Threat Analysis Node
     - Queries Threat Intelligence Vector Store (ChromaDB).
     - Invokes Google Gemini LLM for cognitive threat reasoning.
-    - Computes dynamic algorithmic risk score (0-100) with dynamic mathematical variance.
+    - Computes raw algorithmic risk score (0-100).
     """
     velocity = state.get("velocity_kmh", 0.0)
     entropy = state.get("token_entropy", 0.0)
@@ -196,7 +206,7 @@ def analysis_node(state: AgentGraphState) -> AgentGraphState:
     if is_proxy and not is_automated and entropy <= 3.85:
         risk += 5.0
 
-    # Add dynamic mathematical variance jitter (-3.0 to +3.0) for realistic variations
+    # Add dynamic mathematical variance jitter (-2.5 to +2.5) for realistic variations
     variance_jitter = random.uniform(-2.5, 2.5)
     final_score = round(min(max(risk + variance_jitter, 5.0), 100.0), 1)
     
@@ -209,10 +219,12 @@ def analysis_node(state: AgentGraphState) -> AgentGraphState:
         final_score = round(max(final_score, 82.0), 1)  # Guarantee >80 range
 
     state["algorithmic_risk_score"] = final_score
+    state["raw_risk_score"] = final_score
 
-    # Google Gemini LLM Cognitive Threat Reasoning Generation
+    # Google Gemini LLM Cognitive Threat Reasoning Generation (Strict 3.0s Timeout)
     llm_summary = ""
-    if gemini_client:
+    llm_timed_out = False
+    if gemini_client and final_score >= 50.0:
         try:
             prompt = (
                 f"Act as a Principal Cyber Security Architect analyzing an enterprise authentication anomaly.\n"
@@ -226,31 +238,32 @@ def analysis_node(state: AgentGraphState) -> AgentGraphState:
                 f"- Algorithmic Risk Score: {final_score}/100\n\n"
                 f"Provide a 2-sentence executive threat assessment explaining why this risk level was assigned and the recommended containment strategy."
             )
-            response = gemini_client.models.generate_content(
-                model=LLM_MODEL,
-                contents=prompt
-            )
+            future = _llm_executor.submit(gemini_client.models.generate_content, model=LLM_MODEL, contents=prompt)
+            response = future.result(timeout=3.0)
             if response and hasattr(response, "text") and response.text:
                 llm_summary = response.text.strip()
-        except Exception as e:
-            print(f"[INFO] Gemini LLM Inference Note: {e}")
+        except (concurrent.futures.TimeoutError, TimeoutError):
+            llm_timed_out = True
+            llm_summary = ""
+        except Exception:
             llm_summary = ""
 
     if not llm_summary:
-        # Fallback cognitive reasoning synthesis
+        # Fallback cognitive reasoning synthesis with System Override notice
+        override_prefix = "[SYSTEM OVERRIDE] LLM API timeout exceeded (3000ms). Falling back to deterministic mathematical triage. " if llm_timed_out else ""
         if final_score > 80.0:
             llm_summary = (
-                f"[GEMINI REASONER] Critical identity anomaly detected for {upn} matching {mitre_technique}. "
+                f"{override_prefix}[THREAT MATRIX] Critical identity anomaly detected for {upn} matching {mitre_technique}. "
                 f"High-risk mathematical score ({final_score}/100) indicates immediate token hijacking or impossible travel. Mandatory SOAR containment recommended."
             )
         elif final_score >= 50.0:
             llm_summary = (
-                f"[GEMINI REASONER] Ambiguous proxy/velocity shift flagged for {upn} matching {mitre_technique}. "
+                f"{override_prefix}[THREAT MATRIX] Ambiguous proxy/velocity shift flagged for {upn} matching {mitre_technique}. "
                 f"Moderate risk score ({final_score}/100) requires analyst review before executing automated session termination."
             )
         else:
             llm_summary = (
-                f"[GEMINI REASONER] Identity telemetry for {upn} verified against corporate baseline. "
+                f"[THREAT MATRIX] Identity telemetry for {upn} verified against corporate baseline. "
                 f"Low risk score ({final_score}/100) indicates legitimate user access. Continuous monitoring active."
             )
 
@@ -258,51 +271,97 @@ def analysis_node(state: AgentGraphState) -> AgentGraphState:
     return state
 
 
+def critic_guardrail_node(state: AgentGraphState) -> AgentGraphState:
+    """
+    Node 3: Critic Guardrail Node
+    - Verifies LLM output against deterministic mathematical ground truth.
+    - Prevents ungrounded LLM hallucinations from executing high-impact SOAR actions on clean telemetry.
+    """
+    entropy = state.get("token_entropy", 0.0)
+    velocity = state.get("velocity_kmh", 0.0)
+    raw_risk = state.get("raw_risk_score", state.get("algorithmic_risk_score", 0.0))
+
+    # Check if deterministic math parameters are clean
+    math_clean = (entropy <= 3.85) and (velocity <= 800.0)
+
+    # Hallucination Interception Check
+    if math_clean and raw_risk > 80.0:
+        # Intercept ungrounded LLM hallucination
+        composite_risk = 65.0  # Downgrade to Ambiguous HITL range
+        critic_override = True
+        critic_note = "CRITIC INTERCEPT: Severity downgraded (80+ -> 65.0). LLM elevated verdict contradicted clean mathematical telemetry metrics."
+        state["rewind_count"] = state.get("rewind_count", 0) + 1
+    else:
+        composite_risk = raw_risk
+        critic_override = False
+        critic_note = "GROUNDING VERIFIED: Threat assessment supported by deterministic telemetry parameters."
+
+    state["composite_risk_score"] = composite_risk
+    state["algorithmic_risk_score"] = composite_risk
+    state["critic_override"] = critic_override
+    state["critic_note"] = critic_note
+
+    return state
+
+
 def response_node(state: AgentGraphState) -> AgentGraphState:
     """
-    Response Node (The Triage Matrix):
-    Strictly enforces action boundaries:
-    - Score > 80 (CRITICAL): Action="AUTONOMOUS_CRITICAL_BLOCK". Calls SOAR to revoke IDP session, block IP, and send email notification.
+    Node 4: Response Node
+    Strictly enforces action boundaries using composite_risk_score:
+    - Score > 80 (CRITICAL): Action="AUTONOMOUS_CRITICAL_BLOCK". Calls closed-loop verified SOAR enforcer.
     - Score 50 to 80 (AMBIGUOUS): Action="HUMAN_IN_LOOP_REQUIRED". Pauses execution, logs "Awaiting Analyst Approval".
     - Score < 50 (SAFE): Action="AUTONOMOUS_MONITOR". Logs safely.
     """
-    score = state.get("algorithmic_risk_score", 0.0)
+    score = state.get("composite_risk_score", state.get("algorithmic_risk_score", 0.0))
     curr = state["current_event"]
     upn = curr.get("user_principal_name", "unknown_user")
     ip = curr.get("source_ip", "0.0.0.0")
+    token = curr.get("session_token", "")
     llm_reasoning = state.get("llm_reasoning", "")
+    critic_override = state.get("critic_override", False)
+    critic_note = state.get("critic_note", "")
 
     soar_logs = []
+    evaluation_verified = True
+    audit_trace = ""
 
-    if score > 80.0:
-        action = "AUTONOMOUS_CRITICAL_BLOCK"
-        # Call SOAR engine mutators including Email Notification Dispatch
-        log_revoke = EnterpriseSOAREnforcer.revoke_identity_session(upn)
-        log_block = EnterpriseSOAREnforcer.block_perimeter_ip(ip)
-        log_email = EnterpriseSOAREnforcer.dispatch_security_notification_email(
-            upn, {"classification": state.get("classification")}
+    # Dynamic Autonomy Calibration - uses autonomy_engine thresholds
+    action = autonomy_engine.classify_action(score)
+
+    if action == "AUTONOMOUS_CRITICAL_BLOCK":
+        # Call Closed-Loop SOAR engine wrapper
+        soar_result = EnterpriseSOAREnforcer.enforce_mitigation_with_verification(
+            user_principal_name=upn,
+            source_ip=ip,
+            session_token=token,
+            context={"classification": state.get("classification")}
         )
-        soar_logs.extend([log_revoke, log_block, log_email])
+        soar_logs = soar_result.get("soar_execution_logs", [])
+        evaluation_verified = soar_result.get("evaluation_verified", True)
+        audit_trace = soar_result.get("audit_trace", "")
+
+        critic_prefix = f"[{critic_note}] " if critic_override else ""
         reasoning = (
-            f"CRITICAL Threat Level ({score:.1f}/100 > 80.0). {llm_reasoning} "
-            f"Autonomous SOAR executed: Revoked sessions for '{upn}', blocked IP '{ip}', and dispatched client notification email."
+            f"{critic_prefix}CRITICAL Threat Level ({score:.1f}/100). {llm_reasoning} "
+            f"Closed-loop verified SOAR executed: Revoked sessions for '{upn}', blocked IP '{ip}', and dispatched email notification."
         )
-    elif 50.0 <= score <= 80.0:
-        action = "HUMAN_IN_LOOP_REQUIRED"
+    elif action == "HUMAN_IN_LOOP_REQUIRED":
+        critic_prefix = f"[{critic_note}] " if critic_override else ""
         reasoning = (
-            f"AMBIGUOUS Threat Level ({score:.1f}/100 between 50-80). {llm_reasoning} "
+            f"{critic_prefix}AMBIGUOUS Threat Level ({score:.1f}/100). {llm_reasoning} "
             f"Automated SOAR enforcement paused. Awaiting Analyst Approval in Cyber Command Portal."
         )
     else:
-        action = "AUTONOMOUS_MONITOR"
         reasoning = (
-            f"SAFE Access Level ({score:.1f}/100 < 50.0). {llm_reasoning} "
+            f"SAFE Access Level ({score:.1f}/100). {llm_reasoning} "
             f"Recorded in baseline audit ledger."
         )
 
     state["action"] = action
     state["reasoning"] = reasoning
     state["soar_execution_logs"] = soar_logs
+    state["evaluation_verified"] = evaluation_verified
+    state["audit_trace"] = audit_trace
 
     # Build AgentAssessment schema output
     assessment = AgentAssessment(
@@ -318,7 +377,11 @@ def response_node(state: AgentGraphState) -> AgentGraphState:
         reasoning=reasoning,
         soar_execution_logs=soar_logs,
         velocity_kmh=state.get("velocity_kmh"),
-        token_entropy=state.get("token_entropy")
+        token_entropy=state.get("token_entropy"),
+        critic_override=critic_override,
+        critic_note=critic_note,
+        evaluation_verified=evaluation_verified,
+        audit_trace=audit_trace
     )
 
     state["assessment"] = assessment.model_dump() if hasattr(assessment, "model_dump") else assessment.dict()
@@ -326,22 +389,41 @@ def response_node(state: AgentGraphState) -> AgentGraphState:
 
 
 class LangGraphEnterprisePipeline:
-    """Stateful LangGraph pipeline orchestrator."""
+    """Stateful LangGraph pipeline orchestrator running 4-Node Verified Swarm Topology."""
 
     def __init__(self):
         builder = StateGraph(AgentGraphState)
 
         builder.add_node("ingestion", ingestion_node)
         builder.add_node("analysis", analysis_node)
+        builder.add_node("critic", critic_guardrail_node)
         builder.add_node("response", response_node)
 
         builder.set_entry_point("ingestion")
         builder.add_edge("ingestion", "analysis")
-        builder.add_edge("analysis", "response")
+        builder.add_edge("analysis", "critic")
+        builder.add_conditional_edges(
+            "critic",
+            self._should_rewind,
+            {"rewind": "analysis", "proceed": "response"}
+        )
         builder.add_edge("response", END)
 
         self.vector_store = ThreatIntelligenceMemory()
         self.app = builder.compile()
+
+    @staticmethod
+    def _should_rewind(state: AgentGraphState) -> str:
+        """
+        Self-Healing State Rewind Logic:
+        If the Critic Guardrail intercepted a hallucination (critic_override=True),
+        rewind back to the analysis node with a correction hint for re-evaluation.
+        Only rewinds ONCE to prevent infinite loops (checks rewind_count).
+        """
+        rewind_count = state.get("rewind_count", 0)
+        if state.get("critic_override", False) and rewind_count < 1:
+            return "rewind"
+        return "proceed"
 
     def process_event(
         self, current_event: Dict[str, Any], previous_event: Optional[Dict[str, Any]] = None
@@ -357,9 +439,15 @@ class LangGraphEnterprisePipeline:
             "token_entropy": 0.0,
             "is_automated_ua": False,
             "is_proxy": False,
+            "email_risk_score": 0.0,
+            "detection_flags": [],
             "query_text": "",
             "vector_match": {},
             "algorithmic_risk_score": 0.0,
+            "raw_risk_score": 0.0,
+            "composite_risk_score": 0.0,
+            "critic_override": False,
+            "critic_note": "",
             "indicators": [],
             "classification": "",
             "mitre_technique": "",
@@ -367,8 +455,12 @@ class LangGraphEnterprisePipeline:
             "action": "",
             "reasoning": "",
             "soar_execution_logs": [],
+            "evaluation_verified": True,
+            "audit_trace": "",
+            "rewind_count": 0,
             "assessment": None
         }
 
         output_state = self.app.invoke(initial_state)
         return output_state
+

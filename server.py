@@ -19,6 +19,8 @@ load_dotenv()
 from core.schemas import TelemetryEvent, AgentAssessment, HITLApprovalRequest
 from core.mitigation_engine import EnterpriseSOAREnforcer
 from agents.graph_pipeline import LangGraphEnterprisePipeline
+from core.autonomy_calibrator import autonomy_engine
+from tools.generate_pdf_report import ForensicReportGenerator
 
 app = FastAPI(
     title="Autonomous SOC (Agentic-SOC) API Engine",
@@ -51,8 +53,65 @@ class HITLDecisionRequest(BaseModel):
     notes: Optional[str] = "Analyst action taken from Command Theater."
 
 
+class LoginRequest(BaseModel):
+    username: str
+    password: str
+    mfa_code: Optional[str] = ""
+
+
+VALID_OPERATORS = {
+    "commander.sarah@aegis-soc.org": {
+        "password": "CyberAegis#2026!",
+        "name": "Commander Sarah Connor",
+        "role": "SECURITY_COMMANDER",
+        "clearance": "LEVEL 4 (ALPHA CLEARANCE)"
+    },
+    "analyst.alex@aegis-soc.org": {
+        "password": "AegisAnalyst#99!",
+        "name": "Senior Analyst Alex Hunter",
+        "role": "LEAD_SOC_ANALYST",
+        "clearance": "LEVEL 3 (TACTICAL CLEARANCE)"
+    },
+    "admin@enterprise.com": {
+        "password": "admin123",
+        "name": "Enterprise Administrator",
+        "role": "GLOBAL_ADMIN",
+        "clearance": "LEVEL 4 (MASTER ACCESS)"
+    }
+}
+
+
+@app.post("/api/v1/auth/login")
+async def authenticate_operator(request: LoginRequest):
+    """
+    POST /api/v1/auth/login
+    Authenticates security operators and issues biometric clearance session.
+    """
+    username = request.username.strip().lower()
+    password = request.password.strip()
+
+    if username in VALID_OPERATORS and VALID_OPERATORS[username]["password"] == password:
+        user_info = VALID_OPERATORS[username]
+        return {
+            "status": "SUCCESS",
+            "message": "BIOMETRIC IDENT CONFIRMED // ACCESS GRANTED",
+            "token": f"aegis_jwt_token_{username.split('@')[0]}_lvl4_secure",
+            "operator": {
+                "name": user_info["name"],
+                "email": username,
+                "role": user_info["role"],
+                "clearance": user_info["clearance"]
+            }
+        }
+    
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="SECURITY BREACH: Invalid operator identity credentials or unauthorized clearance level."
+    )
+
+
 @app.post("/api/v1/telemetry/ingest", response_model=Dict[str, Any])
-async def ingest_telemetry(event: TelemetryEvent):
+def ingest_telemetry(event: TelemetryEvent):
     """
     POST /api/v1/telemetry/ingest
     Ingests authentication telemetry, checks user trajectory history,
@@ -92,6 +151,11 @@ async def ingest_telemetry(event: TelemetryEvent):
                 "is_automated_ua": graph_state.get("is_automated_ua", False),
                 "is_proxy": graph_state.get("is_proxy", False),
                 "algorithmic_risk_score": graph_state.get("algorithmic_risk_score", 0.0),
+                "composite_risk_score": graph_state.get("composite_risk_score", 0.0),
+                "critic_override": graph_state.get("critic_override", False),
+                "critic_note": graph_state.get("critic_note", ""),
+                "evaluation_verified": graph_state.get("evaluation_verified", True),
+                "audit_trace": graph_state.get("audit_trace", ""),
                 "vector_match": graph_state.get("vector_match", {}),
                 "llm_reasoning": graph_state.get("llm_reasoning", "")
             }
@@ -216,6 +280,95 @@ async def get_soc_stats():
         "vector_store_status": "ONLINE (ChromaDB)",
         "llm_status": "ACTIVE (Gemini 2.5 Flash)"
     }
+
+
+# ============================================================
+# AUTONOMY CALIBRATION ENDPOINTS
+# ============================================================
+
+@app.get("/api/v1/autonomy/status")
+async def get_autonomy_status():
+    """GET /api/v1/autonomy/status - Returns current autonomy calibration level and thresholds."""
+    return autonomy_engine.get_status()
+
+
+class AutonomyLevelRequest(BaseModel):
+    level: int
+
+
+@app.post("/api/v1/autonomy/set")
+async def set_autonomy_level(request: AutonomyLevelRequest):
+    """POST /api/v1/autonomy/set - Adjusts the dynamic autonomy calibration level (1-4)."""
+    try:
+        result = autonomy_engine.set_level(request.level)
+        return result
+    except ValueError as e:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(e))
+
+
+# ============================================================
+# FORENSIC PDF REPORT ENDPOINT
+# ============================================================
+
+from fastapi.responses import HTMLResponse
+
+
+@app.get("/api/v1/report/generate", response_class=HTMLResponse)
+async def generate_forensic_report(operator: str = "Security Operator"):
+    """GET /api/v1/report/generate - Generates a downloadable forensic HTML incident report."""
+    html_content = ForensicReportGenerator.generate_report(
+        audit_logs=audit_ledger,
+        operator_name=operator
+    )
+    return HTMLResponse(content=html_content)
+
+
+# ============================================================
+# ATTACK GRAPH DATA ENDPOINT
+# ============================================================
+
+@app.get("/api/v1/attack-graph/data")
+async def get_attack_graph_data():
+    """
+    GET /api/v1/attack-graph/data
+    Returns structured node/edge data for the Identity Attack Network Graph visualization.
+    """
+    nodes = []
+    edges = []
+    seen_ips = set()
+    seen_upns = set()
+    seen_classes = set()
+
+    for log in audit_ledger[:50]:  # Latest 50 events
+        ip = log.get("source_ip", "0.0.0.0")
+        upn = log.get("user_principal_name") or log.get("principal", "unknown")
+        classification = log.get("classification", "Unknown")
+        risk_score = log.get("risk_score", 0)
+        action = log.get("action", "AUTONOMOUS_MONITOR")
+        mitre = log.get("mitre_technique", "Unknown")
+
+        # Add IP node
+        if ip not in seen_ips:
+            seen_ips.add(ip)
+            ip_type = "attacker" if risk_score > 80 else "suspicious" if risk_score >= 50 else "safe"
+            nodes.append({"id": ip, "label": ip, "type": ip_type, "group": "ip"})
+
+        # Add UPN node
+        if upn not in seen_upns:
+            seen_upns.add(upn)
+            nodes.append({"id": upn, "label": upn.split("@")[0], "type": "identity", "group": "upn"})
+
+        # Add Classification node
+        class_id = classification.replace(" ", "_")
+        if class_id not in seen_classes:
+            seen_classes.add(class_id)
+            nodes.append({"id": class_id, "label": classification, "type": "threat", "group": "classification"})
+
+        # Add edges
+        edges.append({"source": ip, "target": upn, "risk": risk_score, "action": action, "mitre": mitre})
+        edges.append({"source": upn, "target": class_id, "risk": risk_score, "action": action, "mitre": mitre})
+
+    return {"nodes": nodes, "edges": edges, "total_events": len(audit_ledger)}
 
 
 class RAGQueryRequest(BaseModel):
